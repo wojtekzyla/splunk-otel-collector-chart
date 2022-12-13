@@ -78,6 +78,10 @@ spec:
         {{- end }}
         image: {{ template "splunk-otel-collector.image.otelcol" . }}
         imagePullPolicy: {{ .Values.image.otelcol.pullPolicy }}
+        {{ - if $gateway.securityContext }}
+        securityContext:
+          {{ toYaml $gateway.containers.securityContext | nindent 10 }}
+        {{ - end }}
         env:
           - name: SPLUNK_MEMORY_TOTAL_MIB
             value: "{{ include "splunk-otel-collector.convertMemToMib" $gateway.resources.limits.memory }}"
