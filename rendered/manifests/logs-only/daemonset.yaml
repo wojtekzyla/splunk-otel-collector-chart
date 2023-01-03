@@ -97,6 +97,7 @@ spec:
         volumeMounts:
         - name: varlog
           mountPath: /var/log
+          readOnly: true
         - name: varlogdest
           mountPath: /var/lib/docker/containers
           readOnly: true
