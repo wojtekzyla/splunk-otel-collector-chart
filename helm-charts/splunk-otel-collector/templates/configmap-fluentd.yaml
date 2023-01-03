@@ -92,7 +92,7 @@ data:
       @label @CONCAT
       tag tail.file.{{ or $logDef.sourcetype $name }}
       path {{ $logDef.from.file.path }}
-      pos_file {{ $.Values.fluentd.config.posFilePrefix }}-{{ $name }}.pos
+      pos_file {{ .Values.fluentd.config.posFilePrefix }}-{{ $name }}.pos
       read_from_head true
       path_key source
       {{- if $logDef.multiline }}
@@ -139,7 +139,7 @@ data:
       <storage>
         @type local
         persistent true
-        path {{ $.Values.fluentd.config.posFilePrefix }}-{{ $name }}.pos.json
+        path {{ .Values.fluentd.config.posFilePrefix }}-{{ $name }}.pos.json
       </storage>
       <entry>
         field_map {"MESSAGE": "log", "_SYSTEMD_UNIT": "source"}

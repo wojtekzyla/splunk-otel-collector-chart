@@ -562,8 +562,19 @@ fluentd:
       cpu: 100m
       memory: 200Mi
 
+# To run fluentd container as a non root user and enable other seccurity features,
+# delete runAsUser: 0 and uncomment other securityContext settings
+
   securityContext:
     runAsUser: 0
+  #  securityContext:
+  #  readOnlyRootFilesystem: true
+  #  allowPrivilegeEscalation: false
+  #  seccompProfile:
+  #    type: RuntimeDefault
+  #  runAsUser: 20000
+  #  runAsGroup: 20000
+  #  runAsNonRoot: true
 
   # Extra enviroment variables to be set in the FluentD container
   extraEnvs: []
