@@ -1,15 +1,19 @@
-{{ $agent := fromYaml (include "splunk-otel-collector.agent" .) }}
-{{- if and (eq (include "splunk-otel-collector.logsEnabled" .) "true") $agent.enabled (eq .Values.logsEngine "fluentd") }}
+---
+# Source: splunk-otel-collector/templates/configmap-fluentd.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ template "splunk-otel-collector.fullname" . }}-fluentd
+  name: default-splunk-otel-collector-fluentd
   labels:
-    {{- include "splunk-otel-collector.commonLabels" . | nindent 4 }}
-    app: {{ template "splunk-otel-collector.name" . }}
-    chart: {{ template "splunk-otel-collector.chart" . }}
-    release: {{ .Release.Name }}
-    heritage: {{ .Release.Service }}
+    app.kubernetes.io/name: splunk-otel-collector
+    helm.sh/chart: splunk-otel-collector-0.67.0
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: default
+    app.kubernetes.io/version: "0.67.0"
+    app: splunk-otel-collector
+    chart: splunk-otel-collector-0.67.0
+    release: default
+    heritage: Helm
 data:
   fluent.conf: |-
     @include system.conf
@@ -22,7 +26,7 @@ data:
   system.conf: |-
     # system wide configurations
     <system>
-      log_level {{ .Values.fluentd.config.logLevel }}
+      log_level info
       root_dir /tmp/fluentd
     </system>
 
@@ -65,11 +69,8 @@ data:
       @type tail
       @label @CONCAT
       tag tail.containers.*
-      path {{ .Values.fluentd.config.path | default "/var/log/containers/*.log" }}
-      {{- if .Values.fluentd.config.excludePath }}
-      exclude_path {{ .Values.fluentd.config.excludePath | toJson }}
-      {{- end }}
-      pos_file {{ .Values.fluentd.config.posFilePrefix }}-containers.log.pos
+      path /var/log/containers/*.log
+      pos_file /var/addon/splunk/fluent_pos/splunk-fluentd-containers.log.pos
       path_key source
       read_from_head true
       <parse>
@@ -82,105 +83,166 @@ data:
 
   source.files.conf: |-
     # This fluentd conf file contains sources for log files other than container logs.
-    {{- $checks := dict "hasFileLog" false }}
-    {{- range $name, $logDef := .Values.fluentd.config.logs }}
-    {{- if $logDef.from.file }}
-    {{- set $checks "hasFileLog" true | and nil }}
     <source>
-      @id tail.file.{{ $name }}
+      @id tail.file.kube-audit
       @type tail
       @label @CONCAT
-      tag tail.file.{{ or $logDef.sourcetype $name }}
-      path {{ $logDef.from.file.path }}
-      pos_file {{ $.Values.fluentd.config.posFilePrefix }}-{{ $name }}.pos
+      tag tail.file.kube:apiserver-audit
+      path /var/log/kube-apiserver-audit.log
+      pos_file /var/addon/splunk/fluent_pos/splunk-fluentd-kube-audit.pos
       read_from_head true
       path_key source
-      {{- if $logDef.multiline }}
-      multiline_flush_interval {{ $logDef.multiline.flushInterval | default "5s" }}
-      {{- end }}
       <parse>
-        {{- if $logDef.multiline }}
-        @type multiline
-        format_firstline {{ $logDef.multiline.firstline }}
-        {{- if $logDef.timestampExtraction }}
-        format1 /^(?<log>{{ $logDef.timestampExtraction.regexp }}.*)$/
-        time_key time
-        time_type string
-        time_format {{ $logDef.timestampExtraction.format }}
-        {{- end }}
-        {{- else if $logDef.timestampExtraction }}
         @type regexp
-        expression /^(?<log>{{ $logDef.timestampExtraction.regexp }}.*)$/
+        expression /^(?<log>.*)$/
         time_key time
         time_type string
-        time_format {{ $logDef.timestampExtraction.format }}
-        {{- else }}
-        @type none
-        message_key log
-        {{- end }}
+        time_format %Y-%m-%dT%H:%M:%SZ
       </parse>
     </source>
-    {{- end }}
-    {{- end }}
 
   source.journald.conf: |-
     # This fluentd conf file contains configurations for reading logs from systemd journal.
-    {{- range $name, $logDef := .Values.fluentd.config.logs }}
-    {{- if $logDef.from.journald }}
-    {{- set $checks "hasJournald" true | and nil }}
     <source>
-      @id journald-{{ $name }}
+      @id journald-docker
       @type systemd
       @label @CONCAT
-      tag journald.{{ or $logDef.sourcetype $name }}
-      path {{ $.Values.fluentd.config.journalLogPath | quote }}
-      matches [{ "_SYSTEMD_UNIT": {{ $logDef.from.journald.unit | quote }} }]
+      tag journald.kube:docker
+      path "/run/log/journal"
+      matches [{ "_SYSTEMD_UNIT": "docker.service" }]
       read_from_head true
       <storage>
         @type local
         persistent true
-        path {{ $.Values.fluentd.config.posFilePrefix }}-{{ $name }}.pos.json
+        path /var/addon/splunk/fluent_pos/splunk-fluentd-docker.pos.json
       </storage>
       <entry>
         field_map {"MESSAGE": "log", "_SYSTEMD_UNIT": "source"}
         field_map_strict true
       </entry>
     </source>
-    {{- end }}
-    {{- end }}
+    <source>
+      @id journald-kubelet
+      @type systemd
+      @label @CONCAT
+      tag journald.kube:kubelet
+      path "/run/log/journal"
+      matches [{ "_SYSTEMD_UNIT": "kubelet.service" }]
+      read_from_head true
+      <storage>
+        @type local
+        persistent true
+        path /var/addon/splunk/fluent_pos/splunk-fluentd-kubelet.pos.json
+      </storage>
+      <entry>
+        field_map {"MESSAGE": "log", "_SYSTEMD_UNIT": "source"}
+        field_map_strict true
+      </entry>
+    </source>
 
   output.conf: |-
     #Events are emitted to the CONCAT label from the container, file and journald sources for multiline processing.
     <label @CONCAT>
       @include output.filter.conf
       # = handle custom multiline logs =
-      {{- range $name, $logDef := .Values.fluentd.config.logs }}
-      {{- if and $logDef.from.pod $logDef.multiline }}
-      {{- $filenameGlob := regexReplaceAll "\\*+" (printf "%s*%s*" $logDef.from.pod ($logDef.from.container | default "")) "*" }}
-      <filter tail.containers.var.log.containers.{{ $filenameGlob }}.log>
+      <filter tail.containers.var.log.containers.dns-controller*.log>
         @type concat
         key log
         timeout_label @SPLUNK
         stream_identity_key stream
-        multiline_start_regexp {{ $logDef.multiline.firstline }}
-        flush_interval {{ $logDef.multiline.flushInterval | default "5s" }}
-        separator {{ $logDef.multiline.separator | default "" | quote }}
+        multiline_start_regexp /^\w[0-1]\d[0-3]\d/
+        flush_interval 5s
+        separator ""
         use_first_timestamp true
       </filter>
-      {{- end }}
-      {{- end }}
-      # = filters for journald logs =
-      {{- range $name, $logDef := .Values.fluentd.config.logs }}
-      {{- if and $logDef.from.journald $logDef.multiline }}
-      <filter journald.{{ or $logDef.sourcetype $name }}>
+      <filter tail.containers.var.log.containers.kube-dns*sidecar*.log>
         @type concat
         key log
         timeout_label @SPLUNK
-        multiline_start_regexp {{ $logDef.multiline.firstline }}
-        flush_interval {{ $logDef.multiline.flushInterval | default "5s" }}
+        stream_identity_key stream
+        multiline_start_regexp /^\w[0-1]\d[0-3]\d/
+        flush_interval 5s
+        separator ""
+        use_first_timestamp true
       </filter>
-      {{- end }}
-      {{- end }}
+      <filter tail.containers.var.log.containers.kube-dns*.log>
+        @type concat
+        key log
+        timeout_label @SPLUNK
+        stream_identity_key stream
+        multiline_start_regexp /^\w[0-1]\d[0-3]\d/
+        flush_interval 5s
+        separator ""
+        use_first_timestamp true
+      </filter>
+      <filter tail.containers.var.log.containers.kube-apiserver*.log>
+        @type concat
+        key log
+        timeout_label @SPLUNK
+        stream_identity_key stream
+        multiline_start_regexp /^\w[0-1]\d[0-3]\d/
+        flush_interval 5s
+        separator ""
+        use_first_timestamp true
+      </filter>
+      <filter tail.containers.var.log.containers.kube-controller-manager*.log>
+        @type concat
+        key log
+        timeout_label @SPLUNK
+        stream_identity_key stream
+        multiline_start_regexp /^\w[0-1]\d[0-3]\d/
+        flush_interval 5s
+        separator ""
+        use_first_timestamp true
+      </filter>
+      <filter tail.containers.var.log.containers.kube-dns-autoscaler*autoscaler*.log>
+        @type concat
+        key log
+        timeout_label @SPLUNK
+        stream_identity_key stream
+        multiline_start_regexp /^\w[0-1]\d[0-3]\d/
+        flush_interval 5s
+        separator ""
+        use_first_timestamp true
+      </filter>
+      <filter tail.containers.var.log.containers.kube-proxy*.log>
+        @type concat
+        key log
+        timeout_label @SPLUNK
+        stream_identity_key stream
+        multiline_start_regexp /^\w[0-1]\d[0-3]\d/
+        flush_interval 5s
+        separator ""
+        use_first_timestamp true
+      </filter>
+      <filter tail.containers.var.log.containers.kube-scheduler*.log>
+        @type concat
+        key log
+        timeout_label @SPLUNK
+        stream_identity_key stream
+        multiline_start_regexp /^\w[0-1]\d[0-3]\d/
+        flush_interval 5s
+        separator ""
+        use_first_timestamp true
+      </filter>
+      <filter tail.containers.var.log.containers.kube-dns*.log>
+        @type concat
+        key log
+        timeout_label @SPLUNK
+        stream_identity_key stream
+        multiline_start_regexp /^\w[0-1]\d[0-3]\d/
+        flush_interval 5s
+        separator ""
+        use_first_timestamp true
+      </filter>
+      # = filters for journald logs =
+      <filter journald.kube:kubelet>
+        @type concat
+        key log
+        timeout_label @SPLUNK
+        multiline_start_regexp /^\w[0-1]\d[0-3]\d/
+        flush_interval 5s
+      </filter>
       # Events are relabeled then emitted to the SPLUNK label
       <match **>
         @type relabel
@@ -204,50 +266,22 @@ data:
         jq '.record | . + (.source | capture("^/var/log/containers/(?<k8s.pod.name>[^_]+)_(?<k8s.namespace.name>[^_]+)_(?<k8s.container.name>[-0-9a-z]+)-(?<container.id>[^.]+).log$")) | . + (.pods_source | capture("^/var/log/pods/[^_]+_[^_]+_(?<k8s.pod.uid>[^/]+)/[^._]+/[0-9]+.log$") // {}) | .sourcetype = ("kube:container:" + .["k8s.container.name"])'
       </filter>
 
-      {{- if .Values.autodetect.istio }}
-      # This filter prepares a temporary "istio_service_name" attribute, the same way as istio service name is generated:
-      # https://github.com/istio/istio/blob/77e00b47a61f0e995a29b33438c9dae7e8aace82/galley/pkg/config/analysis/analyzers/testdata/common/sidecar-injector-configmap.yaml#L110-L115
-      # The temporary "istio_service_name" attribute will be used to set "service.name" attribute in otel-collector
-      # if the pod doesn't have "app" label that should be used instead.
-      # Name of the k8s deployment (or another object owning the pod, if any) is taken from "k8s.pod.name" attribute
-      # using regex to filter out name suffix according to the k8s name generation rules:
-      # https://github.com/kubernetes/apimachinery/blob/ff522ab81c745a9ac5f7eeb7852fac134194a3b6/pkg/util/rand/rand.go#L92-L127
-      <filter tail.containers.**>
-        @type jq_transformer
-        jq '.record | . + (.istio_service_name = (.["k8s.pod.name"] // "istio-proxy" | (capture("^(?<owner_obj>.+?)-(?:(?:[0-9bcdf]+-)?[bcdfghjklmnpqrstvwxz2456789]{5}|[0-9]+)$") | .owner_obj) // .) + "." + (.["k8s.namespace.name"] // "default"))'
-      </filter>
-      {{- end }}
-
       @include output.transform.conf
 
       # create source and sourcetype
-      {{- if $checks.hasJournald }}
       <filter journald.**>
         @type jq_transformer
-        jq '.record.source = "{{ .Values.fluentd.config.journalLogPath }}/" + .record.source | .record.sourcetype = (.tag | ltrimstr("journald.")) {{- range .Values.extraAttributes.custom }}| .record.{{ .name }} = "{{ .value }}" {{- end }} |.record'
+        jq '.record.source = "/run/log/journal/" + .record.source | .record.sourcetype = (.tag | ltrimstr("journald.")) |.record'
       </filter>
-      {{- end }}
 
       # = filters for non-container log files =
-      {{- if $checks.hasFileLog }}
       # extract sourcetype
       <filter tail.file.**>
         @type jq_transformer
-        jq '.record.sourcetype = (.tag | ltrimstr("tail.file.")) {{- range .Values.extraAttributes.custom }}| .record.{{ .name }} = "{{ .value }}" {{- end }} | .record'
+        jq '.record.sourcetype = (.tag | ltrimstr("tail.file.")) | .record'
       </filter>
-      {{- end }}
 
       # = custom filters specified by users =
-      {{- range $name, $filterDef := .Values.fluentd.config.customFilters }}
-      {{- if and $filterDef.tag $filterDef.type }}
-      <filter {{ $filterDef.tag }}>
-        @type {{ $filterDef.type }}
-        {{- if $filterDef.body }}
-        {{- $filterDef.body | nindent 8 }}
-        {{- end }}
-      </filter>
-      {{- end }}
-      {{- end }}
 
       <filter **>
         @type record_transformer
@@ -267,13 +301,16 @@ data:
           host 127.0.0.1
           port 8006
         </server>
-        {{- with .Values.fluentd.config.buffer }}
         <buffer>
-        {{- range $parameter, $value := . }}
-          {{ $parameter }} {{ $value }}
-        {{- end }}
+          @type memory
+          chunk_limit_records 100000
+          chunk_limit_size 1m
+          flush_interval 5s
+          flush_thread_count 1
+          overflow_action block
+          retry_max_times 3
+          total_limit_size 600m
         </buffer>
-        {{- end }}
         <format>
           # we just want to keep the raw logs, not the structure created by docker or journald
           @type single_value
@@ -282,15 +319,10 @@ data:
         </format>
       </match>
     </label>
-
-  {{- /*
-    Default configuration files for CRI container engine.
-    Can be overridden for docker engine by prepare-fluentd-config container.
-  */}}
   source.containers.parse.conf: |-
     @type regexp
     expression /^(?<time>.+) (?<stream>stdout|stderr)( (?<partial_flag>[FP]))? (?<log>.*)$/
-    time_format {{ .Values.fluentd.config.containers.criTimeFormat }}
+    time_format %Y-%m-%dT%H:%M:%S.%N%:z
   output.filter.conf: |-
     # = handle cri/containerd multiline format =
     <filter tail.containers.var.log.containers.**>
@@ -318,4 +350,3 @@ data:
         k8s.container.name ${record["container_name"]}
       </record>
     </filter>
-{{- end }}
